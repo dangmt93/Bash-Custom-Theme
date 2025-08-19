@@ -208,9 +208,112 @@ function __powerline_last_status_prompt {
   [[ -n "$symbols" ]] && echo "$symbols|${STATUS_PROMPT_COLOR}"
 }
 
+# Guard to avoid re-entrancy when prompt draws
+__IN_PROMPT=0
+
+# Convert EPOCHREALTIME to integer microseconds
+__epoch_to_us() {
+  local er="$1"                 # e.g., "1724123456.007005"
+  local sec="${er%.*}"          # seconds
+  local frac="${er#*.}"         # fractional
+  frac="${frac}000000"          # pad right
+  frac="${frac:0:6}"            # keep 6
+  # Force base-10 to avoid octal with leading zeros
+  printf '%s\n' $(( 10#${sec} * 1000000 + 10#${frac} ))
+}
+
+# Start timer right before each command
+__timer_start() {
+  # Skip if we're inside prompt rendering to avoid measuring prompt itself
+  [[ $__IN_PROMPT -eq 1 ]] && return
+
+  # If we already recorded a start for this line, don't overwrite it.
+  # (Prevents resets that cause tiny deltas like 5ms.)
+  if [[ -n "${__CMD_START_US:-}${__CMD_START_S:-}" ]]; then
+    return
+  fi
+
+  # Ignore commands that are part of drawing the prompt or our timer helpers
+  case "$BASH_COMMAND" in
+    __powerline_prompt_command*|__timer_stop*|__timer_start*|__epoch_to_us*)
+      return;;
+  esac
+
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    __CMD_START_US="$(__epoch_to_us "$EPOCHREALTIME")"
+    __CMD_START_S=""  # clear fallback
+  else
+    __CMD_START_US=""
+    __CMD_START_S=$SECONDS
+  fi
+}
+trap '__timer_start' DEBUG
+
+# Stop timer; called from PROMPT_COMMAND: Calculate elapsed time of last command
+__timer_stop() {
+  LAST_COMMAND_DURATION=""
+
+  # --- Case 1: High-resolution timing with EPOCHREALTIME (microseconds) ---
+  if [[ -n "${__CMD_START_US:-}" && -n "${EPOCHREALTIME:-}" ]]; then
+    # Convert current EPOCHREALTIME to integer microseconds
+    local now_us="$(__epoch_to_us "$EPOCHREALTIME")"
+
+    # Calculate elapsed time in microseconds
+    local delta_us=$(( now_us - __CMD_START_US ))
+    unset __CMD_START_US  # clear for next command
+
+    # Convert to milliseconds
+    local total_ms=$(( delta_us / 1000 ))
+
+    # Milliseconds remainder (0–999)
+    local ms=$(( total_ms % 1000 ))
+
+    # Convert to total seconds
+    local total_s=$(( total_ms / 1000 ))
+
+    # Extract minutes and leftover seconds
+    local mins=$(( total_s / 60 ))
+    local secs=$(( total_s % 60 ))
+
+    # Format output depending on how long the command took
+    if (( mins > 0 )); then
+      # If >= 1 minute, show minutes, seconds, and ms
+      LAST_COMMAND_DURATION="⏱ ${mins}m ${secs}s ${ms}ms"
+    elif (( total_s > 0 )); then
+      # If >= 1 second but < 1 minute, show seconds and ms
+      LAST_COMMAND_DURATION="⏱ ${secs}s ${ms}ms"
+    else
+      # If < 1 second, show only ms
+      LAST_COMMAND_DURATION="⏱ ${ms}ms"
+    fi
+
+  # --- Case 2: Fallback when EPOCHREALTIME not available (second resolution only) ---
+  elif [[ -n "${__CMD_START_S:-}" ]]; then
+    # Calculate elapsed seconds
+    local elapsed=$(( SECONDS - __CMD_START_S ))
+    unset __CMD_START_S  # clear for next command
+
+    # Break into minutes and seconds
+    local mins=$(( elapsed / 60 ))
+    local secs=$(( elapsed % 60 ))
+
+    # Format (no ms available in fallback mode)
+    if (( mins > 0 )); then
+      LAST_COMMAND_DURATION="⏱ ${mins}m ${secs}s"
+    else
+      LAST_COMMAND_DURATION="⏱ ${secs}s"
+    fi
+  fi
+}
+
+
 #! UPDATED VERSION of the prompt command - use __reset and prevent duplicate appending
 function __powerline_prompt_command {
   local last_status="$?" ## always the first
+
+  __IN_PROMPT=1        # prevent DEBUG trap from measuring the prompt itself
+  __timer_stop         # compute LAST_COMMAND_DURATION now
+
   local separator_char="${POWERLINE_LEFT_SEPARATOR}"
   local newline_prompt_char="${POWERLINE_PROMPT_CHAR}"
 
@@ -297,11 +400,19 @@ function __powerline_prompt_command {
   ## Combine segments ##
   LEFT_PROMPT="${current_time}${cwd_colored}${git_status}"
 
+  ## Command Duration Line ##
+  local duration_line=""
+  if [[ -n "$LAST_COMMAND_DURATION" ]]; then
+    duration_line="${LAST_COMMAND_DURATION}\n"
+  fi
+
   ## Set PS1 with a newline for the command ##
   # PS1="${LEFT_PROMPT}\n$(__color)${newline_prompt_char} " #? Old version
   #? New version: Use __reset to clear all ANSI formatting before the prompt character.
-  PS1="${LEFT_PROMPT}\n$(__reset)${newline_prompt_char} "
+  # PS1="${LEFT_PROMPT}\n$(__reset)${newline_prompt_char} "
+  PS1="\n${duration_line}\n${LEFT_PROMPT}\n$(__reset)${newline_prompt_char} "
 
+  __IN_PROMPT=0        # allow DEBUG trap again for next command
 
   ## cleanup ##
   unset LAST_SEGMENT_COLOR \
