@@ -224,8 +224,9 @@ __epoch_to_us() {
 
 # Start timer right before each command
 __timer_start() {
-  # Skip if we're inside prompt rendering to avoid measuring prompt itself
+  # Skip if we're inside prompt rendering to avoid measuring prompt build time itself
   [[ $__IN_PROMPT -eq 1 ]] && return
+
 
   # If we already recorded a start for this line, don't overwrite it.
   # (Prevents resets that cause tiny deltas like 5ms.)
@@ -233,11 +234,14 @@ __timer_start() {
     return
   fi
 
-  # Ignore commands that are part of drawing the prompt or our timer helpers
+  # Ignore commands that are part of drawing the prompt or timer helpers functions
   case "$BASH_COMMAND" in
-    __powerline_prompt_command*|__timer_stop*|__timer_start*|__epoch_to_us*)
-      return;;
+  __powerline_prompt_command*|__timer_stop*|__timer_start*|__epoch_to_us*)
+    return;;
   esac
+
+  # Record the command that is about to run (to detect resets like `clear` or `reset`)
+  __LAST_COMMAND="$BASH_COMMAND"
 
   if [[ -n "${EPOCHREALTIME:-}" ]]; then
     __CMD_START_US="$(__epoch_to_us "$EPOCHREALTIME")"
@@ -251,6 +255,13 @@ trap '__timer_start' DEBUG
 
 # Stop timer; called from PROMPT_COMMAND: Calculate elapsed time of last command
 __timer_stop() {
+  # If last command was `clear` or similar, skip showing duration
+  if [[ "$__LAST_COMMAND" == "clear" || "$__LAST_COMMAND" == "reset" ]]; then
+    LAST_COMMAND_DURATION=""
+    unset __LAST_COMMAND __CMD_START_US __CMD_START_S
+    return
+  fi
+
   LAST_COMMAND_DURATION=""
 
   # --- Case 1: High-resolution timing with EPOCHREALTIME (microseconds) ---
@@ -401,16 +412,16 @@ function __powerline_prompt_command {
   LEFT_PROMPT="${current_time}${cwd_colored}${git_status}"
 
   ## Command Duration Line ##
-  local duration_line=""
+  local execution_time_portion=""
   if [[ -n "$LAST_COMMAND_DURATION" ]]; then
-    duration_line="${LAST_COMMAND_DURATION}\n"
+    execution_time_portion="\n${LAST_COMMAND_DURATION}\n\n"
   fi
 
   ## Set PS1 with a newline for the command ##
   # PS1="${LEFT_PROMPT}\n$(__color)${newline_prompt_char} " #? Old version
   #? New version: Use __reset to clear all ANSI formatting before the prompt character.
   # PS1="${LEFT_PROMPT}\n$(__reset)${newline_prompt_char} "
-  PS1="\n${duration_line}\n${LEFT_PROMPT}\n$(__reset)${newline_prompt_char} "
+  PS1="${execution_time_portion}${LEFT_PROMPT}\n$(__reset)${newline_prompt_char} "
 
   __IN_PROMPT=0        # allow DEBUG trap again for next command
 
@@ -495,10 +506,10 @@ __color_matrix() {
   done
 }
 
-__character_map () {
-  echo "powerline: ±●➦★⚡★ ✗✘✓✓✔✕✖✗← ↑ → ↓"
-  echo "other: ☺☻👨⚙⚒⚠⌛"
-}
+# __character_map () {
+#   echo "powerline: ±●➦★⚡★ ✗✘✓✓✔✕✖✗← ↑ → ↓"
+#   echo "other: ☺☻👨⚙⚒⚠⌛"
+# }
 
 # bind 'set show-all-if-ambiguous on'
 # bind 'TAB:menu-complete'
